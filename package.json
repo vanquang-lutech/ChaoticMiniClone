@@ -6,10 +6,10 @@
     "sync:text-styles": "node scripts/sync-text-styles.mjs",
     "sync:products": "node scripts/import-products.mjs",
     "predev": "npm run sync:text-styles && npm run sync:products",
-    "dev": "next dev -p 3001",
+    "dev": "next dev -p 3002",
     "prebuild": "npm run sync:text-styles && npm run sync:products",
     "build": "next build",
-    "start": "next start -p 3001",
+    "start": "next start -p 3002",
     "lint": "eslint ."
   },
   "dependencies": {

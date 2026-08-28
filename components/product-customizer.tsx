@@ -10,8 +10,9 @@ import {
   useState,
 } from "react";
 import Link from "next/link";
-import { LoaderCircle } from "lucide-react";
+import { Check, Download, LoaderCircle, Maximize2, Minus, Move, Plus, RefreshCcw, Sparkles, WandSparkles, X } from "lucide-react";
 import {
+  customizeProduct,
   generateImage,
   generateText,
   getHealth,
@@ -22,7 +23,7 @@ import {
   type JobStatus,
   type UsageSummary,
 } from "@/lib/api";
-import type { StoreProduct } from "@/lib/products";
+import type { CustomField, StoreProduct } from "@/lib/products";
 import { SiteHeader } from "./site-header";
 import css from "./product-customizer.module.css";
 
@@ -43,6 +44,25 @@ type DesignLayer = {
 };
 
 const fallbackStyles = ["collegiate", "comic-bold", "gold-foil", "miami-script", "pastel-candy", "pixel-block", "street-tag", "y2k-neon"];
+const isAnotherOption = (value: string) => /another\s*-?\s*pls\s+note\/dm(?:\s+for)?\s+us/i.test(value);
+const customFieldContent = {
+  school: { label: "SCHOOL NAME", placeholder: "e.g. HARVARD", apiKey: "school_name" },
+  mascot: { label: "MASCOT", placeholder: "e.g. BULLDOGS", apiKey: "mascot" },
+  name: { label: "NAME", placeholder: "e.g. SMITH", apiKey: "name" },
+  number: { label: "NUMBER", placeholder: "e.g. 10", apiKey: "number" },
+  color: { label: "COLOR", placeholder: "e.g. RED / WHITE", apiKey: "color" },
+} as const;
+
+const emptyCustomValues: Record<CustomField, string> = { school: "", mascot: "", name: "", number: "", color: "" };
+
+async function imageUrlToFile(url: string, filename: string) {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error("Không thể tải ảnh mẫu của sản phẩm.");
+  const blob = await response.blob();
+  const type = blob.type || "image/png";
+  const extension = type === "image/jpeg" ? "jpg" : type === "image/webp" ? "webp" : "png";
+  return new File([blob], `${filename}.${extension}`, { type });
+}
 
 function Icon({ name, size = 18 }: { name: "sparkle" | "plus" | "trash" | "rotate" | "arrow" | "check" | "magic"; size?: number }) {
   const paths = {
@@ -66,6 +86,10 @@ export default function ProductCustomizer({ product }: { product: StoreProduct }
   const [textStyles, setTextStyles] = useState(fallbackStyles);
   const [selectedStyle, setSelectedStyle] = useState(fallbackStyles[0]);
   const [selectedOptions, setSelectedOptions] = useState(() => product.options.map((option) => option.values[0] ?? ""));
+  const [customValues, setCustomValues] = useState<Record<CustomField, string>>(emptyCustomValues);
+  const [orderNote, setOrderNote] = useState("");
+  const [referenceFile, setReferenceFile] = useState<File | null>(null);
+  const [formError, setFormError] = useState("");
   const [activeImage, setActiveImage] = useState(0);
   const [busy, setBusy] = useState<"upload" | "image" | "text" | null>(null);
   const [jobStatus, setJobStatus] = useState<JobStatus | null>(null);
@@ -73,19 +97,44 @@ export default function ProductCustomizer({ product }: { product: StoreProduct }
   const [online, setOnline] = useState<boolean | null>(null);
   const [usage, setUsage] = useState<UsageSummary>({ date_from: "", date_to: "", calls: 0, input_tokens: 0, output_tokens: 0, total_tokens: 0, by_model: [], by_feature: [] });
   const [showDone, setShowDone] = useState(false);
+  const [customizing, setCustomizing] = useState(false);
+  const [customJobStatus, setCustomJobStatus] = useState<JobStatus | null>(null);
+  const [customResultUrl, setCustomResultUrl] = useState<string | null>(null);
+  const [resultScale, setResultScale] = useState(1);
+  const [resultPosition, setResultPosition] = useState({ x: 0, y: 0 });
+  const [resultDragging, setResultDragging] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const printZoneRef = useRef<HTMLDivElement>(null);
   const objectUrlsRef = useRef(new Set<string>());
   const dragRef = useRef<{ id: string; startX: number; startY: number; originX: number; originY: number } | null>(null);
+  const resultDragRef = useRef<{ startX: number; startY: number; originX: number; originY: number } | null>(null);
   const selectedLayer = layers.find((layer) => layer.id === selectedId) ?? null;
-  const isBusy = busy !== null;
+  const isBusy = busy !== null || customizing;
   const matchingVariant = product.variants.find((variant) => variant.options.every((value, index) => value === selectedOptions[index]))
     ?? product.variants.find((variant) => variant.available)
     ?? product.variants[0];
   const displayPrice = matchingVariant?.price ?? product.price;
   const displayOriginalPrice = matchingVariant?.compareAtPrice ?? product.originalPrice;
+  const needsOrderNote = selectedOptions.some(isAnotherOption);
   const selectedImage = product.images[activeImage]?.src ?? product.image;
+  const selectProductImage = useCallback((index: number) => {
+    setActiveImage(index);
+    setSelectedId(null);
+  }, []);
+
+  useEffect(() => {
+    const gallery = document.querySelector<HTMLElement>("[data-product-gallery]");
+    if (!gallery) return;
+    const handleGalleryClick = (event: MouseEvent) => {
+      const button = (event.target as Element).closest<HTMLButtonElement>("button[data-image-index]");
+      if (!button || !gallery.contains(button)) return;
+      const index = Number.parseInt(button.dataset.imageIndex ?? "", 10);
+      if (Number.isInteger(index)) selectProductImage(index);
+    };
+    gallery.addEventListener("click", handleGalleryClick);
+    return () => gallery.removeEventListener("click", handleGalleryClick);
+  }, [selectProductImage]);
 
   const refreshMeta = useCallback(async () => {
     const [health, usageResult, stylesResult] = await Promise.allSettled([getHealth(), getUsage(), getTextStyles()]);
@@ -189,14 +238,120 @@ export default function ProductCustomizer({ product }: { product: StoreProduct }
   const scaleSelected = (delta: number) => selectedLayer && updateLayer(selectedLayer.id, { scale: Math.min(1.35, Math.max(.22, selectedLayer.scale + delta)) });
   const processingLabel = (status: LayerStatus) => status === "removing-background" ? "Removing background…" : status === "generating-text" ? "Styling text…" : status === "generating-image" ? "Generating artwork…" : "Processing…";
 
+  const resetResultView = () => {
+    setResultScale(1);
+    setResultPosition({ x: 0, y: 0 });
+  };
+
+  const closeResult = () => {
+    setCustomResultUrl(null);
+    setCustomJobStatus(null);
+    resetResultView();
+  };
+
+  const handleCustomProduct = async () => {
+    if (customizing) return;
+    setFormError("");
+
+    const mode = needsOrderNote ? "note" : "fields";
+    const fieldPayload = Object.fromEntries(product.customFields
+      .map((field) => [customFieldContent[field].apiKey, customValues[field].trim()] as const)
+      .filter(([apiKey, value]) => apiKey !== customFieldContent.color.apiKey || Boolean(value)));
+    const missingFields = product.customFields.filter((field) => field !== "color" && !customValues[field].trim());
+
+    if (mode === "fields" && product.customFields.length === 0) {
+      setFormError("Sản phẩm này không hỗ trợ tùy chỉnh.");
+      return;
+    }
+    if (mode === "fields" && missingFields.length) {
+      setFormError(`Vui lòng nhập ${missingFields.map((field) => customFieldContent[field].label).join(", ")}.`);
+      return;
+    }
+    if (mode === "note" && !orderNote.trim()) {
+      setFormError("Vui lòng nhập ORDER NOTE trước khi tạo áo.");
+      return;
+    }
+
+    setCustomizing(true);
+    setCustomJobStatus("pending");
+    setNotice("Preparing your jersey mock-up…");
+    try {
+      const customTemplateImage = needsOrderNote ? product.images[0]?.src ?? product.image : selectedImage;
+      const template = await imageUrlToFile(customTemplateImage, `product-${product.id}`);
+      const accepted = await customizeProduct({
+        template,
+        productId: String(product.id),
+        mode,
+        fields: mode === "fields" ? fieldPayload : undefined,
+        note: mode === "note" ? orderNote.trim() : undefined,
+        reference: mode === "note" ? referenceFile ?? undefined : undefined,
+      });
+      setCustomJobStatus(accepted.status);
+      setNotice("AI is customizing your jersey…");
+      const finished = await pollJob(accepted.job_id, (status) => {
+        setCustomJobStatus(status);
+        setNotice(status === "running" ? "AI is applying your customization…" : "Your custom job is queued…");
+      });
+      const result = finished.images[0]?.url;
+      if (!result) throw new Error("Backend hoàn tất nhưng không trả về ảnh tùy chỉnh.");
+      setCustomResultUrl(result);
+      resetResultView();
+      setNotice("Custom complete — your jersey preview is ready.");
+      setShowDone(true);
+      void refreshMeta();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Không thể tùy chỉnh sản phẩm.";
+      setFormError(message);
+      setNotice(message);
+      setCustomJobStatus("failed");
+    } finally {
+      setCustomizing(false);
+    }
+  };
+
+  const handleResultPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId);
+    resultDragRef.current = { startX: event.clientX, startY: event.clientY, originX: resultPosition.x, originY: resultPosition.y };
+    setResultDragging(true);
+  };
+
+  const handleResultPointerMove = (event: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = resultDragRef.current;
+    if (!drag) return;
+    setResultPosition({ x: drag.originX + event.clientX - drag.startX, y: drag.originY + event.clientY - drag.startY });
+  };
+
+  const handleResultPointerEnd = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (resultDragRef.current) event.currentTarget.releasePointerCapture(event.pointerId);
+    resultDragRef.current = null;
+    setResultDragging(false);
+  };
+
+  const downloadResult = async () => {
+    if (!customResultUrl) return;
+    try {
+      const response = await fetch(customResultUrl);
+      if (!response.ok) throw new Error("download failed");
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${product.slug}-custom.png`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      setFormError("Không thể tải ảnh xuống. Vui lòng thử lại.");
+    }
+  };
+
   return (
     <main className={css.page}>
       <SiteHeader />
-      <div className={css.breadcrumb}><Link href="/">HOME</Link><span>/</span><Link href="/#shop">JERSEYS</Link><span>/</span><b>{product.shortName.toUpperCase()}</b></div>
+      <div className={css.breadcrumb}><Link href="/">HOME</Link><span>/</span><Link href="/products">ALL PRODUCTS</Link><span>/</span><b>{product.shortName.toUpperCase()}</b></div>
       <section className={css.productTop}>
         <div className={css.previewColumn}>
           <div className={css.galleryLayout}>
-            <div className={css.thumbnails}>{product.images.slice(0, 8).map((image, index) => <button key={image.src} className={activeImage === index ? css.activeThumbnail : ""} onClick={() => setActiveImage(index)}><img src={image.src} alt={image.alt} /></button>)}</div>
+            <div className={css.thumbnails} data-product-gallery>{product.images.slice(0, 8).map((image, index) => <button type="button" data-image-index={index} key={`${image.src}-${index}`} className={activeImage === index ? css.activeThumbnail : ""} aria-label={`View product image ${index + 1}`} aria-pressed={activeImage === index}><img src={image.src} alt={image.alt || `${product.name} view ${index + 1}`} draggable={false} /></button>)}</div>
             <div>
           <div className={css.previewTag}>LIVE AI PREVIEW <span className={online ? css.online : ""} /></div>
           <div className={css.previewStage}>
@@ -224,11 +379,25 @@ export default function ProductCustomizer({ product }: { product: StoreProduct }
           <button className={css.reviewLink}>★★★★★ <u>4.7 (67 reviews)</u></button>
           <p className={css.price}><s>${displayOriginalPrice.toFixed(2)} USD</s><strong>${displayPrice.toFixed(2)} USD</strong><span>{Math.round((1 - displayPrice / displayOriginalPrice) * 100)}% OFF</span></p>
           <p className={css.shipping}>Shipping calculated at checkout.</p>
-          {product.options.map((option, optionIndex) => <div className={css.optionGroup} key={option.name}><div className={css.optionName}><b>{option.name}</b><span>{selectedOptions[optionIndex]}</span></div><div className={css.optionValues}>{option.values.map((value) => <button key={value} className={selectedOptions[optionIndex] === value ? css.optionSelected : ""} onClick={() => setSelectedOptions((current) => current.map((choice, index) => index === optionIndex ? value : choice))}>{value}</button>)}</div></div>)}
+          {product.options.map((option, optionIndex) => <div className={css.optionGroup} key={option.name}><div className={css.optionName}><b>{option.name}</b><span>{selectedOptions[optionIndex]}</span></div><div className={css.optionValues}>{option.values.map((value) => <button type="button" key={value} className={`${selectedOptions[optionIndex] === value ? css.optionSelected : ""} ${isAnotherOption(value) ? css.anotherOption : ""}`} onClick={() => {
+            const nextOptions = selectedOptions.map((choice, index) => index === optionIndex ? value : choice);
+            setSelectedOptions(nextOptions);
+            if (isAnotherOption(value)) {
+              selectProductImage(0);
+              return;
+            }
+            const nextVariant = product.variants.find((variant) => variant.options.every((variantValue, index) => variantValue === nextOptions[index]));
+            const nextImageIndex = nextVariant?.image ? product.images.findIndex((image) => image.src === nextVariant.image) : -1;
+            if (nextImageIndex >= 0) selectProductImage(nextImageIndex);
+          }}>{value}{isAnotherOption(value) && <span className={css.sparkles} aria-hidden="true">✦ ✦</span>}</button>)}</div></div>)}
           <div className={css.protection}><input type="checkbox" id="protection"/><label htmlFor="protection"><b>Shipping Protection Apparel</b><small>Protect your order from loss/damage.</small></label><strong>$1.99</strong></div>
-          <div className={css.personalisation}><label>NAME <sup>*</sup><input placeholder="e.g. SMITH" /></label><label>NUMBER <sup>*</sup><input placeholder="e.g. 10" /></label></div>
+          {needsOrderNote ? <div className={css.orderCustomFields}>
+            <label className={css.orderNote}>ORDER NOTE <sup>*</sup><textarea autoFocus value={orderNote} onChange={(event) => setOrderNote(event.target.value)} placeholder="Tell us how you'd like to customize your item (School Name, Mascot, Name, Number, Color, or any special requests)!" maxLength={500} /></label>
+            <label className={css.orderUpload}>UPLOAD IMAGE <small>(Optional)</small><input type="file" accept="image/png,image/jpeg,image/webp" onChange={(event) => setReferenceFile(event.target.files?.[0] ?? null)} /></label>
+          </div> : product.customFields.length > 0 && <div className={css.personalisation}>{product.customFields.map((field) => <label key={field}><span>{customFieldContent[field].label} {field === "color" ? <small>(Optional)</small> : <sup>*</sup>}</span><input value={customValues[field]} onChange={(event) => setCustomValues((current) => ({ ...current, [field]: event.target.value }))} placeholder={customFieldContent[field].placeholder} maxLength={120} /></label>)}</div>}
+          {formError && <p className={css.formError} role="alert">{formError}</p>}
           <div className={css.quantity}><span>Quantity</span><button>−</button><b>1</b><button>+</button></div>
-          <button className={css.addButton} onClick={() => setShowDone(true)}>ADD CUSTOM JERSEY <span>→</span></button>
+          <button className={css.addButton} onClick={() => void handleCustomProduct()} disabled={customizing || (!needsOrderNote && product.customFields.length === 0)}>{customizing ? <><LoaderCircle className={css.spin} size={17}/> CUSTOMIZING JERSEY…</> : <>ADD CUSTOM JERSEY <span>→</span></>}</button>
           <p className={css.benefits}>✦ MADE TO ORDER &nbsp;&nbsp; ✦ PREMIUM MESH &nbsp;&nbsp; ✦ PERSONALIZED BY YOU</p>
           <section className={`${css.studio} ${aiOpen ? css.studioOpen : ""}`} aria-label="AI design tools">
             <button type="button" className={css.studioToggle} onClick={() => setAiOpen((current) => !current)} aria-expanded={aiOpen}><span><b>✦</b> CUSTOMIZE WITH AI</span><small>Remove background, generate art or styled text</small><i>{aiOpen ? "−" : "+"}</i></button>
@@ -251,7 +420,21 @@ export default function ProductCustomizer({ product }: { product: StoreProduct }
         </div>
       </section>
 
-      {showDone && <div className={css.doneBackdrop} onMouseDown={() => setShowDone(false)}><section className={css.doneCard} role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}><button className={css.closeDone} onClick={() => setShowDone(false)}>×</button><span><Icon name="check" size={32}/></span><h2>Your jersey is saved.</h2><p>{layers.length ? `${layers.length} artwork layer${layers.length === 1 ? "" : "s"} will be included on your ${matchingVariant?.title ?? product.shortName} jersey.` : "You can still add AI artwork before checkout."}</p><button className={css.addButton} onClick={() => setShowDone(false)}>KEEP CREATING <Icon name="arrow" size={17}/></button></section></div>}
+      {customizing && <div className={css.customLoadingBackdrop} role="status" aria-live="polite"><section className={css.customLoadingCard} data-custom-job-status={customJobStatus}><div className={css.loadingOrbit}><WandSparkles size={29}/><span/><span/><span/></div><p className={css.eyebrow}>CHAOTIC CUSTOM AI</p><h2>MAKING IT <em>YOURS.</em></h2><p>We’re applying your details while preserving the original garment, print layout and product views.</p><div className={css.loadingTrack}><i/></div><small>{customJobStatus === "running" ? "CUSTOMIZING YOUR JERSEY" : "PREPARING YOUR CUSTOM JOB"}</small></section></div>}
+
+      {customResultUrl && <div className={css.resultBackdrop} onMouseDown={closeResult}><section className={css.resultModal} role="dialog" aria-modal="true" aria-label="Custom jersey preview" onMouseDown={(event) => event.stopPropagation()}>
+        <header className={css.resultHeader}><div><p className={css.eyebrow}>CHAOTIC CUSTOM CLUB</p><h2>CUSTOM <em>PREVIEW.</em></h2></div><div className={css.completePill}><Check size={13}/> CUSTOM COMPLETE</div><button type="button" className={css.resultClose} onClick={closeResult} aria-label="Close custom preview"><X size={20}/></button></header>
+        <div className={css.resultBody}>
+          <div className={`${css.resultViewport} ${resultDragging ? css.resultDragging : ""}`} onPointerDown={handleResultPointerDown} onPointerMove={handleResultPointerMove} onPointerUp={handleResultPointerEnd} onPointerCancel={handleResultPointerEnd} onWheel={(event) => { event.preventDefault(); setResultScale((current) => Math.min(4, Math.max(.5, current + (event.deltaY < 0 ? .15 : -.15)))); }}>
+            <div className={css.resultGrid}/><img src={customResultUrl} alt={`Customized ${product.name}`} draggable={false} style={{ transform: `translate(${resultPosition.x}px, ${resultPosition.y}px) scale(${resultScale})` }}/>
+            <span className={css.panHint}><Move size={13}/> DRAG TO PAN · SCROLL TO ZOOM</span>
+          </div>
+          <aside className={css.resultSidebar}><p className={css.eyebrow}>IMAGE VIEW</p><h3>YOUR JERSEY<br/>IS READY.</h3><p>Inspect every detail before continuing. The generated result is stored by your custom job.</p><dl><div><dt>PRODUCT</dt><dd>{product.shortName}</dd></div><div><dt>VARIANT</dt><dd>{matchingVariant?.title ?? "Selected options"}</dd></div><div><dt>ZOOM</dt><dd>{Math.round(resultScale * 100)}%</dd></div></dl></aside>
+        </div>
+        <footer className={css.resultToolbar}><div className={css.resultTools}><button type="button" onClick={() => setResultScale((current) => Math.max(.5, current - .2))} aria-label="Zoom out"><Minus size={16}/><span>ZOOM OUT</span></button><button type="button" onClick={() => setResultScale((current) => Math.min(4, current + .2))} aria-label="Zoom in"><Plus size={16}/><span>ZOOM IN</span></button><button type="button" onClick={resetResultView}><Maximize2 size={16}/><span>FIT</span></button><button type="button" onClick={resetResultView}><RefreshCcw size={16}/><span>RESET VIEW</span></button></div><button type="button" className={css.downloadButton} onClick={() => void downloadResult()}><Download size={16}/> DOWNLOAD PNG</button></footer>
+      </section></div>}
+
+      {showDone && customResultUrl && <div className={css.customToast} role="status"><span><Sparkles size={16}/></span><div><b>CUSTOM COMPLETE</b><small>Your new jersey preview is ready.</small></div><button type="button" onClick={() => setShowDone(false)} aria-label="Dismiss notification"><X size={15}/></button></div>}
     </main>
   );
 }

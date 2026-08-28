@@ -6,8 +6,18 @@ export type ImageRef = {
 
 export type JobAccepted = {
   job_id: string;
-  feature: "upload" | "generate_image" | "custom_text";
+  feature: "upload" | "generate_image" | "custom_text" | "custom_product";
   status: JobStatus;
+};
+
+export type CustomProductRequest = {
+  template: File;
+  productId: string;
+  mode: "fields" | "note";
+  fields?: Record<string, string>;
+  removeFields?: string[];
+  note?: string;
+  reference?: File;
 };
 
 export type JobResponse = JobAccepted & {
@@ -113,6 +123,26 @@ export async function generateText(text: string, stylePreset: string) {
         quality: "low",
       }),
     }),
+  );
+}
+
+export async function customizeProduct(request: CustomProductRequest) {
+  const form = new FormData();
+  form.append("template", request.template);
+  form.append("mode", request.mode);
+  form.append("product_id", request.productId);
+  form.append("quality", "medium");
+
+  if (request.mode === "fields") {
+    form.append("fields", JSON.stringify(request.fields ?? {}));
+    for (const field of request.removeFields ?? []) form.append("remove_fields", field);
+  } else {
+    form.append("note", request.note ?? "");
+    if (request.reference) form.append("reference", request.reference);
+  }
+
+  return parseResponse<JobAccepted>(
+    await fetch("/api/v1/custom-product", { method: "POST", body: form }),
   );
 }
 
